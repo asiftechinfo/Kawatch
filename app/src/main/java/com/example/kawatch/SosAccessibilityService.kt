@@ -2,7 +2,6 @@
 package com.example.kawatch
 
 import android.accessibilityservice.AccessibilityService
-import android.content.Context
 import android.content.Intent
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -25,16 +24,16 @@ class SosAccessibilityService : AccessibilityService(), SensorEventListener {
     private var resetShakeCountJob: Job? = null
 
     companion object {
-        private const val SHAKE_THRESHOLD_GRAVITY = 2.7f
+        private const val SHAKE_THRESHOLD_GRAVITY = 4.0f // Increased for "heavy" shake
         private const val SHAKE_DEBOUNCE_MS = 500 // Ignore rapid succession of events from a single shake
-        private const val REQUIRED_SHAKE_COUNT = 2
-        private const val SHAKE_COUNT_WINDOW_MS = 3000L // Must have 2 shakes within 3 seconds
+        private const val REQUIRED_SHAKE_COUNT = 3 // Increased to 3
+        private const val SHAKE_COUNT_WINDOW_MS = 2000L // Must have 3 shakes within 2 seconds
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         Log.d("SosAccessibilityService", "Service connected")
-        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         if (accelerometer != null) {
             sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_UI)

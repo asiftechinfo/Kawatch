@@ -4,6 +4,7 @@
 package com.example.kawatch
 
 import android.Manifest
+import android.app.Activity
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -73,7 +74,7 @@ private const val PREFS_NAME = "KawatchPrefs"
 private const val PREF_KEY_USER_PROFILE = "userProfile"
 
 data class UserProfile(val name: String, val age: String, val emergencyNumber: String)
-data class RecordingItem(val name: String, val path: String)
+data class RecordingItem(val name: String, val path: String, val formattedDate: String)
 
 enum class AppState {
     CHECKING_PERMISSIONS, REQUIRES_PERMISSIONS, REQUIRES_ACCESSIBILITY, REQUIRES_PROFILE, READY, RECORDING_LIBRARY, SOS_COUNTDOWN
@@ -122,6 +123,7 @@ fun AppNavigator(
     val context = LocalContext.current
     val sharedPrefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
     val gson = remember { Gson() }
+    val activity = (LocalContext.current as? Activity)
 
     if (triggerShake.value) {
         appState.value = AppState.SOS_COUNTDOWN
@@ -142,7 +144,6 @@ fun AppNavigator(
                 if (profileJson == null) {
                     appState.value = AppState.REQUIRES_PROFILE
                 } else {
-                    // Only load profile if it's not already loaded
                     if (userProfile.value == null) {
                         userProfile.value = gson.fromJson(profileJson, UserProfile::class.java)
                     }
@@ -174,7 +175,7 @@ fun AppNavigator(
                     appState.value = AppState.REQUIRES_PROFILE
                 }
             },
-            onCancel = { appState.value = AppState.READY }
+            onCancel = { activity?.finish() }
         )
         AppState.READY -> userProfile.value?.let {
             ActivationScreen(
@@ -187,7 +188,6 @@ fun AppNavigator(
                 externalTrigger = triggerSos
             )
         } ?: Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            // This will show if READY state is reached but profile is null (e.g., after cancel from countdown)
             CircularProgressIndicator(color = MaterialTheme.colorScheme.tertiary)
         }
         AppState.RECORDING_LIBRARY -> RecordingsScreen { appState.value = AppState.READY }
@@ -213,7 +213,6 @@ fun ActivationScreen(
         val finalAudioFile = audioFile
         stopRecording(mediaRecorder)
         mediaRecorder = null
-        audioFile = null
         isSosActive = false
         statusMessage = "Ready: Say \"$TARGET_VOICE_COMMAND\" or shake phone"
 
@@ -491,6 +490,7 @@ fun RecordingsScreen(onNavigateBack: () -> Unit) {
     var recordings by remember { mutableStateOf(getSavedRecordings(context)) }
     var currentlyPlaying by remember { mutableStateOf<String?>(null) }
     val mediaPlayer = remember { MediaPlayer() }
+
     fun playRecording(path: String) {
         try {
             if (currentlyPlaying == path) {
@@ -503,6 +503,7 @@ fun RecordingsScreen(onNavigateBack: () -> Unit) {
             Log.e("MediaPlayer", "Error playing recording", e); currentlyPlaying = null
         }
     }
+
     fun deleteRecording(item: RecordingItem) {
         val file = File(item.path)
         if (file.exists()) {
@@ -512,6 +513,7 @@ fun RecordingsScreen(onNavigateBack: () -> Unit) {
             Toast.makeText(context, "${item.name} deleted.", Toast.LENGTH_SHORT).show()
         }
     }
+
     fun saveRecordingToDownloads(item: RecordingItem) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             Toast.makeText(context, "Saving to Downloads requires Android 10+.", Toast.LENGTH_LONG).show(); return
@@ -531,7 +533,9 @@ fun RecordingsScreen(onNavigateBack: () -> Unit) {
             Log.e("SaveRecording", "File copy failed", e); Toast.makeText(context, "Error saving file.", Toast.LENGTH_SHORT).show()
         }
     }
+
     DisposableEffect(Unit) { onDispose { mediaPlayer.release() } }
+
     Scaffold(
         topBar = { TopAppBar(title = { Text("Emergency Recordings") }, navigationIcon = { IconButton(onClick = onNavigateBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primary, titleContentColor = MaterialTheme.colorScheme.onPrimary, navigationIconContentColor = MaterialTheme.colorScheme.onPrimary)) },
         containerColor = MaterialTheme.colorScheme.background
@@ -544,6 +548,7 @@ fun RecordingsScreen(onNavigateBack: () -> Unit) {
                     val isPlaying = currentlyPlaying == recording.path
                     ListItem(
                         headlineContent = { Text(recording.name, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        supportingContent = { Text(recording.formattedDate, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)) },
                         modifier = Modifier.clickable { playRecording(recording.path) },
                         leadingContent = { Icon(if (isPlaying) Icons.Default.PauseCircle else Icons.Default.PlayCircle, "Play/Pause", tint = MaterialTheme.colorScheme.tertiary) },
                         trailingContent = {
@@ -629,7 +634,25 @@ private fun startRecording(context: Context, file: File): MediaRecorder? {
     }
 }
 private fun stopRecording(mediaRecorder: MediaRecorder?) { mediaRecorder?.let { try { it.stop(); it.release() } catch (e: Exception) { Log.e("MediaRecorder", "Stop failed", e) } } }
-private fun getSavedRecordings(context: Context): List<RecordingItem> = getRecordingsDir(context).listFiles()?.filter { it.isFile && it.name.endsWith(".mp3") }?.map { RecordingItem(it.name, it.absolutePath) }?.sortedByDescending { it.name } ?: emptyList()
+
+private fun getSavedRecordings(context: Context): List<RecordingItem> {
+    val recordingsDir = getRecordingsDir(context)
+    val inputFormat = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+    val outputFormat = SimpleDateFormat("MM/dd/yyyy, hh:mm:ss a", Locale.US)
+
+    return recordingsDir.listFiles()?.filter { it.isFile && it.name.endsWith(".mp3") }?.mapNotNull { file ->
+        try {
+            val dateString = file.name.substringAfter("SOS_RECORDING_").substringBefore(".mp3")
+            val date = inputFormat.parse(dateString)
+            val formattedDate = date?.let { outputFormat.format(it) } ?: "Invalid date"
+            RecordingItem(file.name, file.absolutePath, formattedDate)
+        } catch (e: Exception) {
+            Log.e("RecordingDateParse", "Failed to parse date from ${file.name}", e)
+            null // Exclude files with invalid date format
+        }
+    }?.sortedByDescending { it.name } ?: emptyList()
+}
+
 private fun sendSms(context: Context, phoneNumber: String, message: String) {
     try {
         context.getSystemService(SmsManager::class.java).sendTextMessage(phoneNumber, null, message, null, null)
