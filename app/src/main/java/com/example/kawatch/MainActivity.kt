@@ -4,14 +4,13 @@ package com.example.kawatch
 
 import android.Manifest
 import android.app.Activity
-import android.content.Context
+import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
@@ -19,10 +18,7 @@ import android.provider.Telephony
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.telephony.SmsManager
 import android.text.TextUtils
-import android.util.Log
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -68,10 +64,21 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import com.google.gson.Gson
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import android.telephony.SubscriptionManager
+import android.telephony.SmsManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
+import android.util.Log
+import android.content.Context
 
 private const val TARGET_VOICE_COMMAND = "help"
 private const val PREFS_NAME = "KawatchPrefs"
@@ -213,6 +220,7 @@ fun ActivationScreen(
     externalTrigger: MutableState<Boolean>
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var statusMessage by remember { mutableStateOf("READY") }
     var isSosActive by remember { mutableStateOf(false) }
     val speechRecognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
@@ -230,11 +238,15 @@ fun ActivationScreen(
 
         if (finalAudioFile != null && finalAudioFile.exists() && !mmsIntentLaunched) {
             mmsIntentLaunched = true
-            Toast.makeText(context, "SOS deactivated. Preparing recording...", Toast.LENGTH_LONG).show()
-            val message = "Follow-up audio from the recent emergency alert from ${userProfile.name}."
-            sendMmsWithAttachment(context, userProfile.emergencyNumber, message, finalAudioFile)
+            Toast.makeText(context, "Preparing recording...", Toast.LENGTH_SHORT).show()
+            val message = "Emergency recording from ${userProfile.name}."
+
+            scope.launch {
+                delay(1000)
+                sendMmsWithAttachment(context, userProfile.emergencyNumber, message, finalAudioFile)
+            }
         } else {
-            Toast.makeText(context, "SOS deactivated.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "SOS stopped.", Toast.LENGTH_SHORT).show()
         }
         startListening(context, speechRecognizer)
     }
@@ -245,23 +257,35 @@ fun ActivationScreen(
         mmsIntentLaunched = false
         isSosActive = true
         speechRecognizer.stopListening()
-        statusMessage = "SENDING ALERTS..."
+        statusMessage = "FETCHING LOCATION..."
 
-        val ageInfo = if (userProfile.age.isNotBlank()) " Age: ${userProfile.age}." else ""
-        sendSms(context, userProfile.emergencyNumber, "EMERGENCY! ${userProfile.name} needs help!$ageInfo (Location following...)")
-
+        // 1. Request Location FIRST
         requestCurrentLocation(context) { location: Location? ->
-            val locationString = if (location != null) "https://www.google.com/maps/search/?api=1&query=${location.latitude},${location.longitude}" else "Location not available."
-            val textMessage = "UPDATE: My location is $locationString"
+
+            // 2. Format the location and send the SMS
+            val locationString = if (location != null) {
+                "https://maps.google.com/?q=${location.latitude},${location.longitude}"
+            } else {
+                "Location not available."
+            }
+
+            val ageInfo = if (userProfile.age.isNotBlank()) " Age: ${userProfile.age}." else ""
+            val textMessage = "EMERGENCY! ${userProfile.name} needs help!$ageInfo My location is: $locationString"
+
             sendSms(context, userProfile.emergencyNumber, textMessage)
             statusMessage = "RECORDING..."
-        }
 
-        val newAudioFile = createAudioFile(context)
-        audioFile = newAudioFile
-        mediaRecorder = startRecording(context, newAudioFile)
-        if (mediaRecorder == null) {
-            statusMessage = "RECORDING FAILED"
+            // 3. Start Recording AFTER the SMS is sent
+            val newAudioFile = createAudioFile(context)
+            audioFile = newAudioFile
+            mediaRecorder = startRecording(context, newAudioFile)
+
+            if (mediaRecorder != null) {
+                // 4. Show the requested Toast
+                Toast.makeText(context, "Recording started. Stop recording to send MMS.", Toast.LENGTH_LONG).show()
+            } else {
+                statusMessage = "RECORDING FAILED"
+            }
         }
     }
 
@@ -667,37 +691,72 @@ private fun requestCurrentLocation(context: Context, onLocationReceived: (Locati
 
 private fun sendSms(context: Context, phoneNumber: String, message: String) {
     try {
-        val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) context.getSystemService(SmsManager::class.java) else SmsManager.getDefault()
-        smsManager.sendTextMessage(phoneNumber, null, message, null, null)
-    } catch (e: Exception) { Log.e("Kawatch", "SMS failed", e) }
+        Log.d("Kawatch", "Attempting to send SMS to: $phoneNumber")
+
+        val smsManager: SmsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val subManager = context.getSystemService(SubscriptionManager::class.java)
+            val defaultSmsId = SubscriptionManager.getDefaultSmsSubscriptionId()
+
+            if (defaultSmsId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                context.getSystemService(SmsManager::class.java).createForSubscriptionId(defaultSmsId)
+            } else {
+                context.getSystemService(SmsManager::class.java)
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            val defaultSmsId = SubscriptionManager.getDefaultSmsSubscriptionId()
+
+            if (defaultSmsId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                @Suppress("DEPRECATION")
+                SmsManager.getSmsManagerForSubscriptionId(defaultSmsId)
+            } else {
+                @Suppress("DEPRECATION")
+                SmsManager.getDefault()
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            SmsManager.getDefault()
+        }
+
+        val parts = smsManager.divideMessage(message)
+        smsManager.sendMultipartTextMessage(phoneNumber, null, parts, null, null)
+        Log.d("Kawatch", "SMS successfully handed off to the Android system.")
+
+    } catch (e: Exception) {
+        Log.e("Kawatch", "CRITICAL: Failed to send SMS", e)
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(context, "SMS Error: Check SIM settings.", Toast.LENGTH_LONG).show()
+        }
+    }
 }
 
+
 private fun sendMmsWithAttachment(context: Context, phoneNumber: String, message: String, audioFile: File) {
+    if (!audioFile.exists()) return
     try {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", audioFile)
+        val defaultSmsPackage = Telephony.Sms.getDefaultSmsPackage(context)
+        
         val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "audio/mpeg" 
             putExtra("address", phoneNumber)
             putExtra(Intent.EXTRA_PHONE_NUMBER, phoneNumber)
             putExtra("sms_body", message)
             putExtra(Intent.EXTRA_TEXT, message)
             putExtra(Intent.EXTRA_STREAM, uri)
-            type = "audio/*" 
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            clipData = ClipData.newRawUri(null, uri)
+            
+            if (defaultSmsPackage != null) {
+                setPackage(defaultSmsPackage)
+                context.grantUriPermission(defaultSmsPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
         }
         
-        val defaultSmsPackage = Telephony.Sms.getDefaultSmsPackage(context)
-        if (defaultSmsPackage != null) {
-            intent.setPackage(defaultSmsPackage)
-            context.startActivity(intent)
-        } else {
-            val chooser = Intent.createChooser(intent, "Send SOS Recording")
-            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(chooser)
-        }
+        context.startActivity(intent)
     } catch (e: Exception) {
         Log.e("Kawatch", "MMS Error", e)
-        Toast.makeText(context, "MMS Error", Toast.LENGTH_LONG).show()
+        Toast.makeText(context, "Could not attach recording", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -706,29 +765,48 @@ private fun startRecording(context: Context, file: File): MediaRecorder? {
         val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else MediaRecorder()
         recorder.apply {
             setAudioSource(MediaRecorder.AudioSource.MIC)
-            setOutputFormat(MediaRecorder.OutputFormat.THREE_GPP)
-            setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB)
+            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             setOutputFile(file.absolutePath)
             prepare()
             start()
         }
-    } catch (e: Exception) { null }
+    } catch (e: Exception) {
+        Log.e("Kawatch", "Start recording failed", e)
+        null
+    }
 }
 
 private fun stopRecording(recorder: MediaRecorder?) {
-    try { recorder?.apply { stop(); release() } } catch (e: Exception) { }
+    try {
+        recorder?.apply {
+            stop()
+            release()
+        }
+    } catch (e: Exception) {
+        Log.e("Kawatch", "Stop recording failed", e)
+    }
 }
 
 private fun createAudioFile(context: Context): File {
     val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-    return File.createTempFile("SOS_${timeStamp}_", ".3gp", context.getExternalFilesDir(Environment.DIRECTORY_MUSIC))
+    // Save as .mp3 extension in external cache for better compatibility
+    return File.createTempFile("SOS_${timeStamp}_", ".mp3", context.externalCacheDir)
 }
 
 private fun loadRecordings(context: Context): List<RecordingItem> {
     val list = mutableListOf<RecordingItem>()
-    val files = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC)?.listFiles { file -> file.extension == "3gp" } ?: emptyArray()
+    // Look primarily in the Music directory where we now save everything
+    val dir = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC)
     val sdf = SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault())
-    files.sortedByDescending { it.lastModified() }.forEach { list.add(RecordingItem(it.name, it.absolutePath, sdf.format(Date(it.lastModified())))) }
+
+    val files = dir?.listFiles { file ->
+        file.extension == "mp3" || file.extension == "mp4" || file.extension == "3gp"
+    } ?: emptyArray()
+
+    files.sortedByDescending { it.lastModified() }.forEach {
+        list.add(RecordingItem(it.name, it.absolutePath, sdf.format(Date(it.lastModified()))))
+    }
     return list
 }
 

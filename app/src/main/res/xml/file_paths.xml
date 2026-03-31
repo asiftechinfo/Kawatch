@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <files-path name="recordings" path="." />
-    <external-files-path name="external_files" path="." />
+    <files-path name="internal_recordings" path="." />
+    <external-files-path name="external_recordings" path="." />
+    <external-cache-path name="shared_audio" path="." />
 </paths>
